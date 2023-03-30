@@ -10,9 +10,10 @@ using namespace std;
 
 // 任务结构体
 struct Task{
-    int task_id;     // 任务ID
-    void (*task_func)(int);  // 任务函数指针
-    int task_arg;    // 任务参数
+  int client_fd;
+  void (*task_func)(int);  // 任务函数指针
+  Task() {}
+  Task(int fd, void (*func)(int)) : client_fd(fd) , task_func(func){}
 };
 
 // 线程池类
@@ -81,7 +82,7 @@ void ThreadPool::ThreadFunc(void* arg)
     while(!pool->m_stop){
         Task task = pool->GetTask();
         if(task.task_func){
-            task.task_func(task.task_arg);
+            task.task_func(task.client_fd);
         }
     }
 
