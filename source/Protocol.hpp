@@ -6,9 +6,33 @@
 #include <string.h>
 #include <memory>
 
+#define SYETEM_ERROR "system error"
+
 #define LOGIN_SUCCEED "login succeed"
 #define LOGIN_USER_ONLINE "user online"
 #define LOGIN_NAMEORPASSWD_ERROR "name or passwd error"
+
+#define REGISTER_USER_EXIST "name exist"
+#define REGISTER_SUCCEED "register succeed"
+
+//查找条件
+#define FIIND_CRITERIA_ID "id"
+#define FIIND_CRITERIA_NAME "name"
+
+#define USER_NOT_EXIST "user not exist"
+#define USER_EXIST "user exist"
+
+struct UserSelfInfo {
+    
+};
+
+class UserInfo{
+public:
+    unsigned int id;
+    char name[32];
+    char online;
+    // 待拓展 
+};
 
 enum PACK_TYPE {
     PACK_TYPE_MIN = 0,
@@ -18,7 +42,7 @@ enum PACK_TYPE {
 };
 
 struct FilePack {
-    unsigned int pack_size;         // 文件包大小
+    unsigned int data_size;         // data包大小
     char data[];                    // 报数据
 };
 
@@ -27,10 +51,20 @@ enum MSG_TYPE {
 
     MSG_TYPE_LOGIN_REQUEST,         // 登录请求
     MSG_TYPE_LOGIN_RESPOND,         // 登录回复
+
+    MSG_TYPE_REGISTER_REQUEST,    // 注册请求
+    MSG_TYPE_REGISTER_RESPOND,      // 注册回复
+    
+    MSG_TYPE_FIND_USER_REQUEST,        // 查找用户请求
+    MSG_TYPE_FIND_USER_RESPOND,        // 查找用户回复
+    
+
+    MSG_TYPE_ADD_FRIEND_REQUEST,        // 加好友请求
+    MSG_TYPE_ADD_FRIEND_RESPOND,        // 加好友回复
 };
 
 struct MessagePack {
-    unsigned int pack_size;         // 消息包大小
+    unsigned int data_size;         // data大小
     unsigned int msg_type;          // 消息包类型
     char common[64];                // 可以存放一些不大于64字节的消息： 比如用户名、密码之类
     char data[];                    // 大于64字节的消息放在这里
@@ -44,9 +78,18 @@ struct DataPack
 };
 
 
-std::unique_ptr<DataPack> makeDataPack(unsigned int pack_size) {
+
+// 使用智能指针来管理
+
+struct FreeDeleter {
+  void operator()(void* ptr) const {
+    std::free(ptr);
+  }
+};
+
+std::unique_ptr<DataPack, FreeDeleter> makeDataPack(unsigned int pack_size) {
     unsigned int total_size = sizeof(DataPack) + pack_size;
-    std::unique_ptr<DataPack> pack((DataPack*)malloc(total_size));
+    std::unique_ptr<DataPack, FreeDeleter> pack((DataPack*)std::malloc(total_size));
     if(pack == nullptr) {
         exit(EXIT_FAILURE);
     }
@@ -55,73 +98,28 @@ std::unique_ptr<DataPack> makeDataPack(unsigned int pack_size) {
     return pack;
 }
 
-std::unique_ptr<DataPack> makeDataPackMsg(unsigned int pack_size)
+std::unique_ptr<DataPack, FreeDeleter> makeDataPackMsg(unsigned int data_size)
 {
-    std::unique_ptr<DataPack> pack = makeDataPack(pack_size + sizeof(MessagePack));
+    std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPack(data_size + sizeof(MessagePack));
     if(pack == nullptr) {
         exit(EXIT_FAILURE);
     }
     pack->pack_type = PACK_TYPE_MSG;
     MessagePack* msg_page = (MessagePack*)pack->pack_data;
-    msg_page->pack_size = pack_size;
+    msg_page->data_size = data_size;
     return pack;
 }
 
-std::unique_ptr<DataPack> makeDataPackFile(unsigned int pack_size)
+std::unique_ptr<DataPack, FreeDeleter> makeDataPackFile(unsigned int data_size)
 {
-    std::unique_ptr<DataPack> pack = makeDataPack(pack_size + sizeof(FilePack));
+    std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPack(data_size + sizeof(FilePack));
     if(pack == nullptr) {
         exit(EXIT_FAILURE);
     }
     pack->pack_type = PACK_TYPE_FILE;
     FilePack* file_pack = (FilePack*)pack->pack_data;
-    file_pack->pack_size = pack_size;
+    file_pack->data_size = data_size;
     return pack;
 }
 
-
-/*
-DataPack* makeDataPack(unsigned int pack_size);
-DataPack* makeDataPackMsg(unsigned int pack_size);
-DataPack* makeDataPackFile(unsigned int pack_size);
-
-DataPack* makeDataPack(unsigned int pack_size) {
-    unsigned int total_size = sizeof(DataPack) + pack_size;
-    DataPack* pack = (DataPack*)malloc(total_size);
-    if(pack == nullptr) {
-        exit(EXIT_FAILURE);
-    }
-    memset(pack, 0, total_size);
-    pack->total_size = total_size;
-    return pack;
-}
-
-
-
-DataPack *makeDataPackMsg(unsigned int pack_size)
-{
-    DataPack* pack = makeDataPack(pack_size + sizeof(MessagePack));
-    if(pack == nullptr) {
-        exit(EXIT_FAILURE);
-    }
-    //memset(pack, 0, pack_size + sizeof(MessagePack));
-    pack->pack_type = PACK_TYPE_MSG;
-    MessagePack* msg_page = (MessagePack*)pack->pack_data;
-    msg_page->pack_size = pack_size;
-    return pack;
-}
-
-DataPack *makeDataPackFile(unsigned int pack_size)
-{
-    DataPack* pack = makeDataPack(pack_size + sizeof(FilePack));
-    if(pack == nullptr) {
-        exit(EXIT_FAILURE);
-    }
-    //memset(pack, 0, pack_size + sizeof(FilePack));
-    pack->pack_type = PACK_TYPE_FILE;
-    FilePack* file_page = (FilePack*)pack->pack_data;
-    file_page->pack_size = pack_size;
-    return pack;
-}
-*/
 #endif // PROTOCLO_H

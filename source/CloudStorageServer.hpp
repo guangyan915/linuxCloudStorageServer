@@ -11,6 +11,8 @@
 #include <string>
 #include <cstring>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include "ThreadPool.hpp"
 #include "Protocol.hpp"
 #include "DBOperator.hpp"
@@ -28,6 +30,8 @@ private:
     int listen_backlog;                       // listen队列大小
     std::string server_port;                  // 绑定的端口
     int epoll_fd;                             // epoll fd
+    mutex mtx;                                // 互斥锁
+    map<int, std::pair<int, std::string>> login_client;     // 记录登录的用户，以fd作为键，登录类型，和登录名作为值
 public:
     CloudStorageServer();
     ~CloudStorageServer();
@@ -41,16 +45,19 @@ private:
 public:
     void Run();
     void handleConnetClose(int fd);
-    void recvMsg(int fd);
+    static CloudStorageServer& getInstance();
+    static void recvMsg(int fd);
 
 public:
-    void handleLoginRequest(std::unique_ptr<MessagePack> msg_pack, int fd);
+    void handleLoginRequest(MessagePack* msg_pack, int fd);
+    void handleRegisterRequest(MessagePack* msg_pack, int fd);
+    void handleFindUserRequest(MessagePack* msg_pack, int fd);  
 private:
     int toLoadConfig();
     void setConfigValue(std::string s);
     
-    void handleMsgPack(std::unique_ptr<DataPack> pack, int fd);
-    void handleFilePack(std::unique_ptr<DataPack> pack, int fd);
+    void handleMsgPack(DataPack* pack, int fd);
+    void handleFilePack(DataPack* pack, int fd);
 };
 
 
@@ -211,6 +218,9 @@ void CloudStorageServer::Run()
   Bind();
   Listen();
   EpollCreate();
+  // 创建线程池
+  // 最小线程数量，最大线程数量， 任务队列最大长度， 线程空闲时间：ms
+  //ThreadPool thread_poll(4, 12, 100, 5000);
   // 处理事件循环
   std::vector<epoll_event> events(MAX_EVENTS);
   while (true) {    
@@ -231,6 +241,8 @@ void CloudStorageServer::Run()
         // 处理客户端事件        
         std::cout << fd << ":客户端发送消息\n";
         if(events[i].events & EPOLLIN) {
+          //Task task(recvMsg, fd);
+          //thread_poll.AddTask(task);
           recvMsg(fd);
         }
         //else 
@@ -252,6 +264,11 @@ void CloudStorageServer::handleConnetClose(int fd) {
   epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &event);
 }
 
+CloudStorageServer& CloudStorageServer::getInstance() {
+  static CloudStorageServer instance;
+  return instance;
+}
+
 void CloudStorageServer::recvMsg(int fd)
 {
   // 获取包大小
@@ -260,93 +277,204 @@ void CloudStorageServer::recvMsg(int fd)
   if(ret == 0) {
     // 连接关闭
     std::cout << "有客户端退出!\n";
-    handleConnetClose(fd);
+    CloudStorageServer::getInstance().handleConnetClose(fd);
     return;
   }
   else if(ret < 0) {
     // recv出错
-    handleConnetClose(fd);
+    CloudStorageServer::getInstance().handleConnetClose(fd);
     perror("recv error!\n");
-    return ;
+    return;
   }
 
   // 获取包
-  std::unique_ptr<DataPack> pack = makeDataPack(total_size - sizeof(DataPack));
+  std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPack(total_size - sizeof(DataPack));
   std::cout << "包大小：" << total_size << std::endl;
   // 需要偏移记录包大小的变量字节数,也要少读这字节数
-  ret = recv(fd, (char*)pack + sizeof(total_size), total_size - sizeof(total_size), 0);
+  ret = recv(fd, (char*)pack.get() + sizeof(total_size), total_size - sizeof(total_size), 0);
   if(ret == 0) {
     // 连接关闭
     std::cout << "有客户端退出!\n";
-    handleConnetClose(fd);
+    CloudStorageServer::getInstance().handleConnetClose(fd);
     return;
   }
   else if(ret < 0) {
     // recv出错
-    handleConnetClose(fd);
+    CloudStorageServer::getInstance().handleConnetClose(fd);
     perror("recv error!\n");
-    return ;
+    return;
   }
   if(pack->pack_type == PACK_TYPE_MSG) {
-    handleMsgPack(pack, fd);
+    CloudStorageServer::getInstance().handleMsgPack(pack.get(), fd);
   }
   else if(pack->pack_type == PACK_TYPE_FILE){  
-    handleFilePack(pack, fd);
+    CloudStorageServer::getInstance().handleFilePack(pack.get(), fd);
   }
 
-  //std::cout << pack->pack_type << endl;
+  return;
 }
 
 
-void CloudStorageServer::handleMsgPack(std::unique_ptr<DataPack> pack, int fd) {
+void CloudStorageServer::handleMsgPack(DataPack* pack, int fd) {
   MessagePack* msg_pack = (MessagePack*)pack->pack_data;
   switch(msg_pack->msg_type) {
     case MSG_TYPE_LOGIN_REQUEST :
       handleLoginRequest(msg_pack, fd);
       break;
-
+    case MSG_TYPE_REGISTER_REQUEST :
+      handleRegisterRequest(msg_pack, fd);
+    case MSG_TYPE_FIND_USER_REQUEST :
+      handleFindUserRequest(msg_pack, fd);
     default :
       break;
   }
 }
 
-void CloudStorageServer::handleLoginRequest(std::unique_ptr<MessagePack> msg_pack, int fd) {
+void CloudStorageServer::handleLoginRequest(MessagePack* msg_pack, int fd) {
   std::string login_name = std::string(msg_pack->common); 
   std::string passwd = std::string(msg_pack->common + 32);
-  std::cout <<  "name:" << login_name << std::endl;
-  std::cout << "passwd:" << passwd << std::endl;
-  int ret = DBOperator::getInstance().loginIsSucceed(login_name, passwd);
-  std::unique_ptr<DataPack> pack = makeDataPackMsg(0);
+  std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPackMsg(0);
   pack->pack_type = PACK_TYPE_MSG;
   MessagePack* msg = (MessagePack*)pack->pack_data;
   msg->msg_type = MSG_TYPE_LOGIN_RESPOND;
-  std::cout << "MSG_TYPE:" << msg->msg_type << std::endl;
-  std::cout << "sql:" << ret;
+  int ret = DBOperator::getInstance().loginIsSucceed(login_name, passwd);
   if(ret == 0) {
     // 不在线,可以登录
-    strcpy((char*)msg->data, LOGIN_SUCCEED);
+    strcpy((char*)msg->common, LOGIN_SUCCEED);
   }
   else if(ret == 1) {
     // 在线，暂时不能登录
-    strcpy((char*)msg->data, LOGIN_USER_ONLINE);
+    strcpy((char*)msg->common, LOGIN_USER_ONLINE);
   }
   else {
     // 账号或密码错误
-    strcpy((char*)msg->data, LOGIN_NAMEORPASSWD_ERROR);
+    strcpy((char*)msg->common, LOGIN_NAMEORPASSWD_ERROR);
   }
-  ret = send(fd, pack, pack->total_size, 0);
+  
+  ret = send(fd, pack.get(), pack->total_size, 0);
   if(ret <= 0) {
     handleConnetClose(fd);
     perror("send error\n");
   }
   else {
-    std::cout << "发送："  << ret << std::endl;
+    std::cout << "send："  << ret << "byte"  << std::endl;
   }
-  //std::cout << pack->total_size << endl;
-  //std::cout << msg->pack_size;
 }
 
 
-void CloudStorageServer::handleFilePack(std::unique_ptr<DataPack> pack, int fd) {
+void CloudStorageServer::handleRegisterRequest(MessagePack* msg_pack, int fd) {
+  std::string login_name = std::string(msg_pack->common); 
+  std::string passwd = std::string(msg_pack->common + 32);
+  std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPackMsg(0);
+  pack->pack_type = PACK_TYPE_MSG;
+  MessagePack* msg = (MessagePack*)pack->pack_data;
+  msg->msg_type = MSG_TYPE_REGISTER_RESPOND;
+  if(DBOperator::getInstance().userNameIsExist(login_name)) {
+    // 用户名存在
+    strcpy(msg->common, REGISTER_USER_EXIST);
+  }
+  else {
+    // 用户名不存在
+    strcpy(msg->common, REGISTER_SUCCEED);
+    if(!DBOperator::getInstance().insertUser(login_name, passwd)) {
+      strcpy(msg->common, SYETEM_ERROR);
+    }
+  }
+  if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
+    handleConnetClose(fd);
+  }
+}
+
+void CloudStorageServer::handleFindUserRequest(MessagePack* msg_pack, int fd) {
+  std::string find_criteria(msg_pack->common);
+  std::string user(msg_pack->common + 32);
+  
+  //std::cout << "find:" << find_criteria << std::endl;
+  //std::cout << "user:" << user << std::endl;
+  // 按用户名查找
+  if(strcmp(find_criteria.c_str(), FIIND_CRITERIA_NAME) == 0) {
+    // 用户不存在
+    if(!DBOperator::getInstance().userNameIsExist(user)) {
+      std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPackMsg(0);
+      MessagePack* msg = (MessagePack*)pack->pack_data;
+      msg->msg_type = MSG_TYPE_FIND_USER_RESPOND;
+      strcpy(msg->common, USER_NOT_EXIST);
+      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
+        handleConnetClose(fd);
+      }
+    }
+    // 用户存在
+    else {
+      std::vector<UserInfo> user_info;
+      auto ret = DBOperator::getInstance().getUserInfo(find_criteria, user);
+      for(auto e : ret) {
+        UserInfo temp;
+        temp.id = atoi(e[0].c_str());
+        strcpy(temp.name, e[1].c_str());
+        temp.online = e[3][0];
+        user_info.push_back(temp);
+      }
+      
+      //std::cout << "id:"<< ret[0][0] << endl;
+      //std::cout << "name:"<< ret[0][1] << endl;
+      //std::cout << "online:"<< ret[0][3] << endl;
+      std::unique_ptr<DataPack,FreeDeleter> pack = makeDataPackMsg(user_info.size() * sizeof(UserInfo));
+      MessagePack* msg = (MessagePack*)pack->pack_data;
+      msg->msg_type = MSG_TYPE_FIND_USER_RESPOND;
+      strcpy(msg->common, USER_EXIST);
+      for(int i = 0; i < user_info.size(); i++) {
+        memcpy(msg->data + i * sizeof(UserInfo), &user_info[i], sizeof(UserInfo));
+      }
+      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
+        handleConnetClose(fd);
+      }
+
+    }
+  }
+  // 按id查找
+  else if(strcmp(find_criteria.c_str(), FIIND_CRITERIA_ID) == 0) {
+    // 用户不存在
+    if(!DBOperator::getInstance().userIdIsExist(user)) {
+      std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPackMsg(0);
+      MessagePack* msg = (MessagePack*)pack->pack_data;
+      msg->msg_type = MSG_TYPE_FIND_USER_RESPOND;
+      strcpy(msg->common, USER_NOT_EXIST);
+      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
+        handleConnetClose(fd);
+      }
+    }
+    else {
+      // 用户存在
+      std::vector<UserInfo> user_info;
+      std::cout << "id exist!" << std::endl;
+      auto ret = DBOperator::getInstance().getUserInfo(find_criteria, user);
+      //std::cout << "id:"<< ret[0][0] << endl;
+      //std::cout << "name:"<< ret[0][1] << endl;
+      //std::cout << "online:"<< ret[0][3] << endl;
+      //std::cout << "name:"<< ret[0][0] << endl;
+      for(auto e : ret) {
+        UserInfo temp;
+        temp.id = atoi(e[0].c_str());
+        strcpy(temp.name, e[1].c_str());
+        temp.online = e[3][0];
+        user_info.push_back(temp);
+      }
+
+      std::unique_ptr<DataPack,FreeDeleter> pack = makeDataPackMsg(user_info.size() * sizeof(UserInfo));
+      MessagePack* msg = (MessagePack*)pack->pack_data;
+      msg->msg_type = MSG_TYPE_FIND_USER_RESPOND;
+      strcpy(msg->common, USER_EXIST);
+      for(int i = 0; i < user_info.size(); i++) {
+        memcpy(msg->data + i * sizeof(UserInfo), &user_info[i], sizeof(UserInfo));
+      }
+
+      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
+        handleConnetClose(fd);
+      }
+    }
+  }
+}
+
+void CloudStorageServer::handleFilePack(DataPack* pack, int fd) {
 
 }
