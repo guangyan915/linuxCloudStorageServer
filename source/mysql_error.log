@@ -24,3 +24,29 @@ Tue Apr  4 16:42:41 2023
 Failed to execute SQL: Unknown column 'jack' in 'where clause'
 Tue Apr  4 16:44:40 2023
 Failed to execute SQL: Unknown column 'jack' in 'where clause'
+Wed Apr  5 00:56:54 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 00:57:44 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 00:59:38 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 00:59:53 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:00:50 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:01:25 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:02:36 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:02:59 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:05:10 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:05:23 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:08:25 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 01:08:35 2023
+Failed to execute SQL: Query was empty
+Wed Apr  5 23:48:49 2023
+Failed to execute SQL: Table 'cloudStorageInfo.userinfo' doesn't exist

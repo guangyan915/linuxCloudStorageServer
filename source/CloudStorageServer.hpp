@@ -6,6 +6,7 @@
 #include <sys/epoll.h> // epoll
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#include <errno.h>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -30,8 +31,11 @@ private:
     int listen_backlog;                       // listen队列大小
     std::string server_port;                  // 绑定的端口
     int epoll_fd;                             // epoll fd
-    mutex mtx;                                // 互斥锁
-    map<int, std::pair<int, std::string>> login_client;     // 记录登录的用户，以fd作为键，登录类型，和登录名作为值
+    std::mutex mtx;                           // 互斥锁
+    std::mutex mtx_send;
+    std::mutex mtx_recv;
+    map<int, std::pair<int, std::string>> login_user_map;     // 记录登录的用户，以fd作为键，登录类型，和登录名作为值
+    map<std::string, int> login_fd_map;                       // 记录登录的用户， 以用户名为键，fd为值
 public:
     CloudStorageServer();
     ~CloudStorageServer();
@@ -42,6 +46,9 @@ private:
     void Listen();
     void EpollCreate();
     void Accept();
+
+    int Send(int fd, void* buf, size_t len, int flag = 0);
+    int Recv(int fd, void* buf, size_t len, int flag = 0);
 public:
     void Run();
     void handleConnetClose(int fd);
@@ -52,6 +59,7 @@ public:
     void handleLoginRequest(MessagePack* msg_pack, int fd);
     void handleRegisterRequest(MessagePack* msg_pack, int fd);
     void handleFindUserRequest(MessagePack* msg_pack, int fd);  
+    void handleAddFriendRequest(MessagePack* msg_pack, int fd);
 private:
     int toLoadConfig();
     void setConfigValue(std::string s);
@@ -211,6 +219,87 @@ void CloudStorageServer::Accept()
     }
 }
 
+int CloudStorageServer::Send(int fd, void* buf, size_t len, int flag) {
+  mtx_send.lock();
+  int ret = send(fd, buf, len, flag);
+  mtx_send.unlock();
+  if(ret == 0) {
+    std::cout << "用户:" << login_user_map[fd].second << " 退出！" << std::endl;
+    handleConnetClose(fd);
+  }
+  if (ret == -1) {
+    int errsv = errno;  // 保存 errno 的值
+    std::cerr << "send error: " << std::strerror(errno) << std::endl;
+    if (errsv == EAGAIN || errsv == EWOULDBLOCK) {
+      // 非阻塞套接字操作无法立即完成
+    } else if (errsv == EINTR) {
+      // 系统调用被信号中断
+      
+    } else if (errsv == EINVAL) {
+      // 参数不合法
+      
+    } else if (errsv == EMSGSIZE) {
+      // 数据超出套接字缓冲区的大小
+      
+    } else if (errsv == ENOTCONN) {
+      // 套接字未连接
+      
+    } else if (errsv == EPIPE) {
+      // 套接字已经被关闭，还有数据要发送
+      
+    } else {
+      // 其他错误类型
+    }
+    // 暂时先这样处理，关闭连接
+    
+    std::cout << "用户:" << login_user_map[fd].second << " 退出！" << std::endl;
+    handleConnetClose(fd);
+  }
+  return ret;
+}
+
+int CloudStorageServer::Recv(int fd, void* buf, size_t len, int flag) {
+  mtx_recv.lock();
+  int ret = recv(fd, buf, len, flag);
+  mtx_recv.unlock();
+  if(ret == 0) {
+    std::cout << "用户:" << login_user_map[fd].second << " 退出！" << std::endl;
+    handleConnetClose(fd);
+  }
+  if (ret == -1) {
+    int errsv = errno;  // 保存 errno 的值
+    std::cerr << "recv error: " << std::strerror(errno) << std::endl;
+    if (errsv == EAGAIN || errsv == EWOULDBLOCK) {
+      // 非阻塞套接字操作无法立即完成
+      
+    } else if (errsv == EINTR) {
+      // 系统调用被信号中断
+      
+    } else if (errsv == EINVAL) {
+      // 参数不合法
+      
+    } else if (errsv == ECONNRESET) {
+      // 远程端点重置了连接。
+      
+    } else if (errsv == ENOTCONN) {
+      // 套接字未连接
+      
+    } else if (errsv == EBADF) {
+      // 无效的文件描述符
+    } else if(errsv == ENOMEM){
+      // 内存不足
+    } else if(errsv == ENOTSOCK){
+      // 描述符不是一个socket
+    } else {
+      // 其他错误
+    }
+    // 暂时先这样处理，关闭连接
+    handleConnetClose(fd);
+    std::cout << "用户:" << login_user_map[fd].second << " 退出！" << std::endl;
+  }
+  return ret;
+}
+
 void CloudStorageServer::Run()
 {
   Socket();
@@ -228,7 +317,7 @@ void CloudStorageServer::Run()
     int nfds = epoll_wait(epoll_fd, events.data(), events.size(), -1);
     if (nfds < 0) {
       std::cerr << "Failed to wait for events\n";
-      break;
+      continue;
     }
     // 处理事件
     for (int i = 0; i < nfds; i++) {
@@ -247,8 +336,6 @@ void CloudStorageServer::Run()
         }
         //else 
       }
-
-
     }
 
   }
@@ -257,11 +344,17 @@ void CloudStorageServer::Run()
 void CloudStorageServer::handleConnetClose(int fd) {
   // 关掉描述符
   close(fd);
+  DBOperator::getInstance().setNotOnline(login_user_map[fd].first, login_user_map[fd].second);
+  
+  mtx.lock();
+  login_fd_map.erase(login_user_map[fd].second);
+  login_user_map.erase(fd);
   // 将该fd也从epoll中注销
   struct epoll_event event;
   event.data.fd = fd;
   event.events = EPOLLIN;
   epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &event);
+  mtx.unlock();
 }
 
 CloudStorageServer& CloudStorageServer::getInstance() {
@@ -273,37 +366,15 @@ void CloudStorageServer::recvMsg(int fd)
 {
   // 获取包大小
   unsigned int total_size = 0;
-  int ret = recv(fd, &total_size, sizeof(total_size), 0);
-  if(ret == 0) {
-    // 连接关闭
-    std::cout << "有客户端退出!\n";
-    CloudStorageServer::getInstance().handleConnetClose(fd);
-    return;
-  }
-  else if(ret < 0) {
-    // recv出错
-    CloudStorageServer::getInstance().handleConnetClose(fd);
-    perror("recv error!\n");
-    return;
-  }
-
+  
+  int ret = CloudStorageServer::getInstance().Recv(fd, &total_size, sizeof(total_size), 0);
+  if(ret <= 0) return;
   // 获取包
   std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPack(total_size - sizeof(DataPack));
   std::cout << "包大小：" << total_size << std::endl;
   // 需要偏移记录包大小的变量字节数,也要少读这字节数
-  ret = recv(fd, (char*)pack.get() + sizeof(total_size), total_size - sizeof(total_size), 0);
-  if(ret == 0) {
-    // 连接关闭
-    std::cout << "有客户端退出!\n";
-    CloudStorageServer::getInstance().handleConnetClose(fd);
-    return;
-  }
-  else if(ret < 0) {
-    // recv出错
-    CloudStorageServer::getInstance().handleConnetClose(fd);
-    perror("recv error!\n");
-    return;
-  }
+  ret = CloudStorageServer::getInstance().Recv(fd, (char*)pack.get() + sizeof(total_size), total_size - sizeof(total_size), 0);
+  if(ret <= 0) return;
   if(pack->pack_type == PACK_TYPE_MSG) {
     CloudStorageServer::getInstance().handleMsgPack(pack.get(), fd);
   }
@@ -323,8 +394,13 @@ void CloudStorageServer::handleMsgPack(DataPack* pack, int fd) {
       break;
     case MSG_TYPE_REGISTER_REQUEST :
       handleRegisterRequest(msg_pack, fd);
+      break;
     case MSG_TYPE_FIND_USER_REQUEST :
       handleFindUserRequest(msg_pack, fd);
+      break;
+    case MSG_TYPE_ADD_FRIEND_REQUEST :
+      handleAddFriendRequest(msg_pack, fd);
+      break;
     default :
       break;
   }
@@ -333,6 +409,8 @@ void CloudStorageServer::handleMsgPack(DataPack* pack, int fd) {
 void CloudStorageServer::handleLoginRequest(MessagePack* msg_pack, int fd) {
   std::string login_name = std::string(msg_pack->common); 
   std::string passwd = std::string(msg_pack->common + 32);
+  unsigned int login_manner = *((unsigned int*)msg_pack->data);
+  //std::cout << "login_manner:" << login_manner << std::endl;
   std::unique_ptr<DataPack, FreeDeleter> pack = makeDataPackMsg(0);
   pack->pack_type = PACK_TYPE_MSG;
   MessagePack* msg = (MessagePack*)pack->pack_data;
@@ -341,6 +419,18 @@ void CloudStorageServer::handleLoginRequest(MessagePack* msg_pack, int fd) {
   if(ret == 0) {
     // 不在线,可以登录
     strcpy((char*)msg->common, LOGIN_SUCCEED);
+    mtx.lock();
+    login_user_map[fd].first = login_manner;
+    login_user_map[fd].second = login_name;
+    login_fd_map[login_name] = fd;
+    // 用户名登录
+    if(login_manner == 0) DBOperator::getInstance().setOnline(login_manner, login_name);
+    else if(login_manner == 1) {}
+    else if(login_manner == 2) {}
+    else if(login_manner == 3) {}
+    else {}
+    mtx.unlock();
+    std::cout << login_name << "登录成功！" << std::endl;
   }
   else if(ret == 1) {
     // 在线，暂时不能登录
@@ -351,14 +441,7 @@ void CloudStorageServer::handleLoginRequest(MessagePack* msg_pack, int fd) {
     strcpy((char*)msg->common, LOGIN_NAMEORPASSWD_ERROR);
   }
   
-  ret = send(fd, pack.get(), pack->total_size, 0);
-  if(ret <= 0) {
-    handleConnetClose(fd);
-    perror("send error\n");
-  }
-  else {
-    std::cout << "send："  << ret << "byte"  << std::endl;
-  }
+  ret = Send(fd, pack.get(), pack->total_size, 0);
 }
 
 
@@ -380,9 +463,7 @@ void CloudStorageServer::handleRegisterRequest(MessagePack* msg_pack, int fd) {
       strcpy(msg->common, SYETEM_ERROR);
     }
   }
-  if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
-    handleConnetClose(fd);
-  }
+  Send(fd, pack.get(), pack->total_size, 0);
 }
 
 void CloudStorageServer::handleFindUserRequest(MessagePack* msg_pack, int fd) {
@@ -399,8 +480,8 @@ void CloudStorageServer::handleFindUserRequest(MessagePack* msg_pack, int fd) {
       MessagePack* msg = (MessagePack*)pack->pack_data;
       msg->msg_type = MSG_TYPE_FIND_USER_RESPOND;
       strcpy(msg->common, USER_NOT_EXIST);
-      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
-        handleConnetClose(fd);
+      if(Send(fd, pack.get(), pack->total_size, 0) <= 0) {
+        return;
       }
     }
     // 用户存在
@@ -425,8 +506,8 @@ void CloudStorageServer::handleFindUserRequest(MessagePack* msg_pack, int fd) {
       for(int i = 0; i < user_info.size(); i++) {
         memcpy(msg->data + i * sizeof(UserInfo), &user_info[i], sizeof(UserInfo));
       }
-      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
-        handleConnetClose(fd);
+      if(Send(fd, pack.get(), pack->total_size, 0) <= 0) {
+        return;
       }
 
     }
@@ -439,8 +520,8 @@ void CloudStorageServer::handleFindUserRequest(MessagePack* msg_pack, int fd) {
       MessagePack* msg = (MessagePack*)pack->pack_data;
       msg->msg_type = MSG_TYPE_FIND_USER_RESPOND;
       strcpy(msg->common, USER_NOT_EXIST);
-      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
-        handleConnetClose(fd);
+      if(Send(fd, pack.get(), pack->total_size, 0) <= 0) {
+        return;
       }
     }
     else {
@@ -468,9 +549,62 @@ void CloudStorageServer::handleFindUserRequest(MessagePack* msg_pack, int fd) {
         memcpy(msg->data + i * sizeof(UserInfo), &user_info[i], sizeof(UserInfo));
       }
 
-      if(send(fd, pack.get(), pack->total_size, 0) <= 0) {
-        handleConnetClose(fd);
-      }
+      Send(fd, pack.get(), pack->total_size, 0);
+    }
+  }
+}
+
+void CloudStorageServer::handleAddFriendRequest(MessagePack* msg_pack, int fd) {
+  std::string send_name(msg_pack->common);
+  std::string recv_name(msg_pack->common + 32);
+  
+  std::cout << "add:";
+  int ret = DBOperator::getInstance().userIsOnline(recv_name);
+  std::unique_ptr<DataPack, FreeDeleter> pack(makeDataPackMsg(0));
+  MessagePack* msg = (MessagePack*)pack->pack_data;
+  msg->msg_type = MSG_TYPE_ADD_FRIEND_RESPOND;
+  int is_user_friend = DBOperator::getInstance().isUserFriend(send_name ,recv_name);
+  if(ret == -1 || is_user_friend == -1) {
+    // 用户不存在
+    strcpy(msg->common, USER_NOT_EXIST);
+
+  }
+  else if(is_user_friend == 1) {
+    // 以经是好友了
+    std::cout << "is your friend";
+    strcpy(msg->common, IS_USER_FRIEND);
+  }
+  else if(ret == 1) {
+    // 在线
+    std::cout << "online\n";
+    int data_size = msg_pack->data_size;
+    std::unique_ptr<DataPack, FreeDeleter> add_pack(makeDataPackMsg(data_size));
+    MessagePack* add_msg = (MessagePack*)add_pack->pack_data;
+    add_msg->msg_type = MSG_TYPE_ADD_FRIEND_REQUEST;
+    strcpy(add_msg->common, send_name.c_str());
+    strcpy(add_msg->common + 32, recv_name.c_str());
+    if(data_size != 0) {
+      strcpy(add_msg->data, msg_pack->data);
+    }
+    // 请求转发给好友
+    if(Send(login_fd_map[recv_name], add_pack.get(), add_pack->total_size, 0) <= 0) {
+      strcpy(msg->common, ADD_FRIEND_REQUEST_SEND_ERROR);
+      std::cout << send_name << "->" << recv_name  << " error!" << std::endl;
+    }
+    else {
+      strcpy(msg->common, ADD_FRIEND_REQUEST_SEND);
+      std::cout << send_name << "->" << recv_name << std::endl;
+    }
+  }
+  else {
+    // ret == 0 不在线
+    std::cout << "not noline\n";
+    int recv_id = DBOperator::getInstance().getUserId(0, recv_name);
+    int send_id = DBOperator::getInstance().getUserId(0, send_name);
+    if(recv_id == -1) strcpy(msg->common, USER_NOT_EXIST);
+    else {
+      string message (msg_pack->data);
+      DBOperator::getInstance().insertNotOnlineMessage(recv_id, send_id, MSG_TYPE_ADD_FRIEND_REQUEST, message);
     }
   }
 }

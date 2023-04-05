@@ -22,6 +22,10 @@
 #define USER_NOT_EXIST "user not exist"
 #define USER_EXIST "user exist"
 
+#define ADD_FRIEND_REQUEST_SEND "add friend send"
+#define ADD_FRIEND_REQUEST_SEND_ERROR "add friend send error"
+#define IS_USER_FRIEND "is your friend"
+
 struct UserSelfInfo {
     
 };
@@ -32,6 +36,14 @@ public:
     char name[32];
     char online;
     // 待拓展 
+    
+        
+    UserInfo& operator= (const UserInfo& other) {
+      id = other.id;
+      strcpy(name, other.name);
+      online = other.online;  
+      return *this;
+    }
 };
 
 enum PACK_TYPE {
